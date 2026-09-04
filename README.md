@@ -97,7 +97,9 @@ The function takes three arguments:
 - `extension_name` — a string identifying your extension
 - `extension_version` — the version string of your extension
 
-That's it. The telemetry call is fire-and-forget and will not interfere with your extension's loading.
+That's it. The telemetry call never blocks or fails your extension's loading. Closing the database (or exiting the process) waits for an in-flight ping, bounded by a 3 second request timeout; on a normal connection that is one HTTP round trip.
+
+**Requires DuckDB v1.5.0 or newer** (the client relies on `ObjectCacheEntry::GetEstimatedCacheMemory`, added in v1.5.0).
 
 ## How It Works
 
@@ -107,11 +109,15 @@ That's it. The telemetry call is fire-and-forget and will not interfere with you
 
 3. **JSON payload** — A JSON object is constructed using DuckDB's bundled yyjson library containing only the fields listed above.
 
-4. **Async HTTP POST** — On native platforms, the HTTP request is dispatched via `std::async` so it runs in a background thread and does not block extension loading. On WASM (`__EMSCRIPTEN__`), the request is made synchronously since threading is not available.
+4. **Parameters and client on the loading thread** — HTTP settings, proxy, and secrets are resolved and the HTTP client is constructed synchronously during load (no network I/O). Constructing the client is what initialises curl/OpenSSL inside `httpfs`, which matters for step 6.
 
-5. **Silent error handling** — All exceptions from the HTTP request are caught and silently ignored. Telemetry must never cause an extension to fail.
+5. **Background HTTP POST, owned by the database** — On native platforms the request runs on a `std::thread` that is owned by an entry in the database's `ObjectCache`, so `~DatabaseInstance` joins it before tearing down the HTTP machinery. The thread never holds a reference to the database. On WASM (`__EMSCRIPTEN__`), the request is made synchronously since threading is not available.
 
-6. **Symbol hiding** — The `INTERNAL_FUNC` macro applies `__attribute__((visibility("hidden")))` on GCC/Clang to prevent the telemetry function from appearing in the extension's public symbol table.
+6. **Join at process exit** — A process can call `exit()` with the database still alive (the DuckDB shell does so on any non-zero exit). A process-wide `atexit` handler joins any in-flight worker. It is registered only after the client has been constructed, so it lands *after* OpenSSL's own `atexit(OPENSSL_cleanup)` and therefore runs *before* it; otherwise the worker could still be inside a TLS request while OpenSSL is being torn down, which segfaults on shutdown.
+
+7. **Silent error handling** — Everything after the `httpfs` check runs inside a `try`/`catch`: a payload or HTTP-parameter error (for example an `http_proxy` value DuckDB cannot parse) or any exception from the request itself is swallowed. Telemetry must never cause an extension to fail to load.
+
+8. **Symbol hiding** — The `INTERNAL_FUNC` macro applies `__attribute__((visibility("hidden")))` on GCC/Clang to prevent the telemetry function from appearing in the extension's public symbol table.
 
 ## Dependencies
 
@@ -119,7 +125,8 @@ That's it. The telemetry call is fire-and-forget and will not interfere with you
 - DuckDB core headers (available in every extension build)
 - DuckDB's bundled yyjson library (for JSON serialization)
 - The `httpfs` extension at runtime (auto-loaded, ships with DuckDB)
-- C++ standard library (`<future>`, `<cstdlib>`)
+- DuckDB v1.5.0 or newer
+- C++ standard library (`<thread>`, `<mutex>`, `<cstdlib>`)
 
 ## Privacy
 
