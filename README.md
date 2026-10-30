@@ -101,6 +101,26 @@ That's it. The telemetry call never blocks or fails your extension's loading. Cl
 
 **Requires DuckDB v1.5.0 or newer** (the client relies on `ObjectCacheEntry::GetEstimatedCacheMemory`, added in v1.5.0).
 
+### Optional: sending other events
+
+An extension can send its own events (vgi sends one per `ATTACH`) through the same
+transport, with the same opt-out, httpfs handling, and shutdown guarantees:
+
+```cpp
+auto doc = yyjson_mut_doc_new(nullptr);
+auto root = yyjson_mut_obj(doc);
+yyjson_mut_doc_set_root(doc, root);
+QueryFarmAddBaseEnvelope(doc, root, "your_extension", "v1.0.0"); // the 7 base fields
+yyjson_mut_obj_add_str(doc, root, "event", "attach");
+// ... serialize `doc` to `json` ...
+QueryFarmSendEventJson(db, "your_extension", "https://your-endpoint/", json, QueryFarmHttpfsAutoload::DISALLOW);
+```
+
+Pass `QueryFarmHttpfsAutoload::DISALLOW` on any per-query path: auto-loading httpfs is synchronous and
+can download an extension, so the event is dropped instead if httpfs is not already loaded. Each
+event runs on its own worker; finished workers are reaped as new ones start, and the rest are joined
+when the database closes or the process exits.
+
 ## How It Works
 
 1. **Opt-out check** — If the `QUERY_FARM_TELEMETRY_OPT_OUT` environment variable is set, the function returns immediately.
